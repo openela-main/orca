@@ -1,13 +1,13 @@
 %global tarball_version %%(echo %{version} | tr '~' '.')
 
 Name:           orca
-Version:        46.2
-Release:        2%{?dist}
+Version:        48.0
+Release:        1%{?dist}
 Summary:        Assistive technology for people with visual impairments
 
 License:        LGPL-2.1-or-later
 URL:            https://wiki.gnome.org/Projects/Orca
-Source0:        https://download.gnome.org/sources/%{name}/46/%{name}-%{tarball_version}.tar.xz
+Source0:        https://download.gnome.org/sources/%{name}/48/%{name}-%{tarball_version}.tar.xz
 
 BuildArch:      noarch
 
@@ -74,6 +74,10 @@ desktop-file-validate %{buildroot}%{_sysconfdir}/xdg/autostart/orca-autostart.de
 %{_mandir}/man1/orca.1*
 
 %changelog
+* Thu Apr 03 2025 Lukas Tyrychtr <ltyrycht@redhat.com>
+- Update to Orca 48.0 so we have the support for the a11y keyboard monitor
+  Resolves: RHEL-83399
+
 * Tue Oct 29 2024 Troy Dawson <tdawson@redhat.com> - 46.2-2
 - Bump release for October 2024 mass rebuild:
   Resolves: RHEL-64018
