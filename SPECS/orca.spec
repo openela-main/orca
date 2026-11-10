@@ -1,13 +1,14 @@
 %global tarball_version %%(echo %{version} | tr '~' '.')
 
 Name:           orca
-Version:        48.0
-Release:        1%{?dist}
+Version:        48.9
+Release:        3%{?dist}
 Summary:        Assistive technology for people with visual impairments
 
 License:        LGPL-2.1-or-later
 URL:            https://wiki.gnome.org/Projects/Orca
 Source0:        https://download.gnome.org/sources/%{name}/48/%{name}-%{tarball_version}.tar.xz
+Patch0:         error-message-everywhere.patch
 
 BuildArch:      noarch
 
@@ -74,6 +75,18 @@ desktop-file-validate %{buildroot}%{_sysconfdir}/xdg/autostart/orca-autostart.de
 %{_mandir}/man1/orca.1*
 
 %changelog
+* Tue Mar 31 2026 Lukas Tyrychtr <ltyrycht@redhat.com>
+- Backport announcing error-message relation announcement in non-web contexts from 49
+  Resolves: RHEL-132453
+
+* Tue Mar 03 2026 Lukas Tyrychtr <ltyrycht@redhat.com>
+- Bump version so the CI is happy
+  Resolves: RHEL-150866
+
+* Thu Feb 19 2026 Lukas Tyrychtr <ltyrycht@redhat.com>
+- Update to 48.9 bringing in some bugfixes
+  Resolves: RHEL-150866
+
 * Thu Apr 03 2025 Lukas Tyrychtr <ltyrycht@redhat.com>
 - Update to Orca 48.0 so we have the support for the a11y keyboard monitor
   Resolves: RHEL-83399

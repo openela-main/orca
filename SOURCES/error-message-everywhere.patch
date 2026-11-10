@@ -1,0 +1,1119 @@
+From ab2280e5f94cfabf96269689cc83b63e1c975707 Mon Sep 17 00:00:00 2001
+From: Joanmarie Diggs <jdiggs@igalia.com>
+Date: Tue, 1 Apr 2025 16:52:17 +0200
+Subject: [PATCH] Move error-message generation logic into generator
+
+* Also support multiple error-message targets.
+* Also support required and invalid states on comboboxes.
+---
+ src/orca/generator.py        | 15 ++++++++++-----
+ src/orca/script_utilities.py | 34 +++-------------------------------
+ src/orca/speech_generator.py |  3 +++
+ 3 files changed, 16 insertions(+), 36 deletions(-)
+
+diff --git a/src/orca/generator.py b/src/orca/generator.py
+index 8034513c3..bf58550a9 100644
+--- a/src/orca/generator.py
++++ b/src/orca/generator.py
+@@ -760,8 +760,12 @@ class Generator:
+ 
+     @log_generator_output
+     def _generate_state_invalid(self, obj, **_args):
+-        error = self._script.utilities.getError(obj)
+-        if not error:
++        if not AXUtilities.is_invalid_entry(obj):
++            return []
++
++        attrs, _start, _end = AXText.get_text_attributes_at_offset(obj)
++        error = attrs.get("invalid")
++        if not error or error == "false":
+             return []
+ 
+         if self._mode == "braille":
+@@ -774,14 +778,15 @@ class Generator:
+             return []
+ 
+         result = []
+-        if error == 'spelling':
++        if error == "spelling":
+             indicator = indicators[1]
+-        elif error == 'grammar':
++        elif error == "grammar":
+             indicator = indicators[2]
+         else:
+             indicator = indicators[0]
+ 
+-        error_message = self._script.utilities.getErrorMessage(obj)
++        targets = AXUtilities.get_error_message(obj)
++        error_message = "\n".join(map(self._script.utilities.expandEOCs, targets))
+         if error_message:
+             result.append(f"{indicator}: {error_message}")
+         else:
+diff --git a/src/orca/script_utilities.py b/src/orca/script_utilities.py
+index 7c6211ea8..3f1ba5855 100644
+--- a/src/orca/script_utilities.py
++++ b/src/orca/script_utilities.py
+@@ -791,50 +791,22 @@ class Utilities:
+ 
+         return result
+ 
+-    def getError(self, obj):
+-        if not AXUtilities.is_invalid_entry(obj):
+-            return False
+-
+-        attrs, _start, _end = self.textAttributes(obj, 0, True)
+-        error = attrs.get("invalid")
+-        if error == "false":
+-            return False
+-        if error not in ["spelling", "grammar"]:
+-            return True
+-
+-        return error
+-
+-    def _getErrorMessageContainer(self, obj):
+-        if not self.getError(obj):
+-            return None
+-
+-        targets = AXUtilities.get_error_message(obj)
+-        if targets:
+-            return targets[0]
+-
+-        return None
+-
+     def isErrorForContents(self, obj, contents=None):
+         """Returns True of obj is an error message for the contents."""
+ 
+         if not contents:
+             return False
+ 
+-        if not self.isErrorMessage(obj):
++        if not AXUtilities.get_is_error_for(obj):
+             return False
+ 
+         for acc, _start, _end, _string in contents:
+-            if self._getErrorMessageContainer(acc) == obj:
++            targets = AXUtilities.get_error_message(acc)
++            if obj in targets:
+                 return True
+ 
+         return False
+ 
+-    def getErrorMessage(self, obj):
+-        return self.expandEOCs(self._getErrorMessageContainer(obj))
+-
+-    def isErrorMessage(self, obj):
+-        return bool(AXUtilities.get_is_error_for(obj))
+-
+     def deletedText(self, event):
+         return event.any_data
+ 
+diff --git a/src/orca/speech_generator.py b/src/orca/speech_generator.py
+index 3d755302d..9a2e67071 100644
+--- a/src/orca/speech_generator.py
++++ b/src/orca/speech_generator.py
+@@ -2466,6 +2466,9 @@ class SpeechGenerator(generator.Generator):
+         result += self._generate_pause(obj, **args)
+         result += self._generate_position_in_list(obj, **args)
+         result += self._generate_pause(obj, **args)
++        result += self._generate_state_required(obj, **args)
++        result += self._generate_pause(obj, **args)
++        result += self._generate_state_invalid(obj, **args)
+         result += self._generate_keyboard_mnemonic(obj, **args)
+         result += self._generate_default_suffix(obj, **args)
+         return self._generate_default_prefix(obj, **args) + result
+-- 
+2.53.0
+
+From 23668959e241d87d97856f931c708e7cf0e154bf Mon Sep 17 00:00:00 2001
+From: Joanmarie Diggs <jdiggs@igalia.com>
+Date: Tue, 24 Jun 2025 12:38:46 +0200
+Subject: [PATCH] Fix early return in _generate_state_invalid()
+
+_generate_state_invalid() checks for the text attributes at offset
+and returns early if there is no error attribute or the error
+attribute is set to false. That prevents the error message from being
+presented for widgets which have an invalid-entry state but no text
+(e.g. a checkbox) or no "error" text attribute (e.g. native inputs).
+
+See issue #514.
+---
+ src/orca/generator.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/orca/generator.py b/src/orca/generator.py
+index 8b3bf9fff..120e64084 100644
+--- a/src/orca/generator.py
++++ b/src/orca/generator.py
+@@ -765,7 +765,7 @@ class Generator:
+ 
+         attrs, _start, _end = AXText.get_text_attributes_at_offset(obj)
+         error = attrs.get("invalid")
+-        if not error or error == "false":
++        if error == "false":
+             return []
+ 
+         if self._mode == "braille":
+-- 
+2.53.0
+
+From c08f13a0cb29265f176333682ea425cd554165e1 Mon Sep 17 00:00:00 2001
+From: Joanmarie Diggs <jdiggs@igalia.com>
+Date: Tue, 24 Jun 2025 13:27:49 +0200
+Subject: [PATCH] Announce when the invalid-entry state changes
+
+See issue #514.
+---
+ src/orca/ax_utilities_event.py | 25 +++++++++++++++++++++++++
+ src/orca/event_manager.py      |  7 ++++++-
+ src/orca/scripts/default.py    |  7 +++++++
+ src/orca/speech_generator.py   |  8 ++++++++
+ 4 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/src/orca/ax_utilities_event.py b/src/orca/ax_utilities_event.py
+index 35d0c475c..c92b0436d 100644
+--- a/src/orca/ax_utilities_event.py
++++ b/src/orca/ax_utilities_event.py
+@@ -109,6 +109,7 @@ class AXUtilitiesEvent:
+     LAST_KNOWN_CHECKED: dict[int, bool] = {}
+     LAST_KNOWN_EXPANDED: dict[int, bool] = {}
+     LAST_KNOWN_INDETERMINATE: dict[int, bool] = {}
++    LAST_KNOWN_INVALID_ENTRY: dict[int, bool] = {}
+     LAST_KNOWN_PRESSED: dict[int, bool] = {}
+     LAST_KNOWN_SELECTED: dict[int, bool] = {}
+ 
+@@ -135,6 +136,7 @@ class AXUtilitiesEvent:
+         AXUtilitiesEvent.LAST_KNOWN_CHECKED.clear()
+         AXUtilitiesEvent.LAST_KNOWN_EXPANDED.clear()
+         AXUtilitiesEvent.LAST_KNOWN_INDETERMINATE.clear()
++        AXUtilitiesEvent.LAST_KNOWN_INVALID_ENTRY.clear()
+         AXUtilitiesEvent.LAST_KNOWN_PRESSED.clear()
+         AXUtilitiesEvent.LAST_KNOWN_SELECTED.clear()
+         AXUtilitiesEvent.TEXT_EVENT_REASON.clear()
+@@ -158,6 +160,8 @@ class AXUtilitiesEvent:
+         AXUtilitiesEvent.LAST_KNOWN_EXPANDED[hash(obj)] = AXUtilitiesState.is_expanded(obj)
+         AXUtilitiesEvent.LAST_KNOWN_INDETERMINATE[hash(obj)] = \
+             AXUtilitiesState.is_indeterminate(obj)
++        AXUtilitiesEvent.LAST_KNOWN_INVALID_ENTRY[hash(obj)] = \
++            AXUtilitiesState.is_invalid_entry(obj)
+         AXUtilitiesEvent.LAST_KNOWN_PRESSED[hash(obj)] = AXUtilitiesState.is_pressed(obj)
+         AXUtilitiesEvent.LAST_KNOWN_SELECTED[hash(obj)] = AXUtilitiesState.is_selected(obj)
+ 
+@@ -631,6 +635,27 @@ class AXUtilitiesEvent:
+         debug.print_message(debug.LEVEL_INFO, msg, True)
+         return True
+ 
++    @staticmethod
++    def is_presentable_invalid_entry_change(event: Atspi.Event) -> bool:
++        """Returns True if this event should be presented as an invalid-entry-state change."""
++
++        old_state = AXUtilitiesEvent.LAST_KNOWN_INVALID_ENTRY.get(hash(event.source))
++        new_state = AXUtilitiesState.is_invalid_entry(event.source)
++        if old_state == new_state:
++            msg = "AXUtilitiesEvent: The new state matches the old state."
++            debug.print_message(debug.LEVEL_INFO, msg, True)
++            return False
++
++        AXUtilitiesEvent.LAST_KNOWN_INVALID_ENTRY[hash(event.source)] = new_state
++        if event.source != focus_manager.get_manager().get_locus_of_focus():
++            msg = "AXUtilitiesEvent: The event is not from the locus of focus."
++            debug.print_message(debug.LEVEL_INFO, msg, True)
++            return False
++
++        msg = "AXUtilitiesEvent: Event is presentable."
++        debug.print_message(debug.LEVEL_INFO, msg, True)
++        return True
++
+     @staticmethod
+     def is_presentable_name_change(event: Atspi.Event) -> bool:
+         """Returns True if this event should be presented as a name change."""
+diff --git a/src/orca/event_manager.py b/src/orca/event_manager.py
+index 5d8e26778..79038b362 100644
+--- a/src/orca/event_manager.py
++++ b/src/orca/event_manager.py
+@@ -67,7 +67,8 @@ class EventManager:
+     PRIORITY_IMPORTANT = 2
+     PRIORITY_HIGH = 3
+     PRIORITY_NORMAL = 4
+-    PRIORITY_LOW = 5
++    PRIORITY_LOWER = 5
++    PRIORITY_LOW = 6
+ 
+     def __init__(self) -> None:
+         debug.print_message(debug.LEVEL_INFO, "EVENT MANAGER: Initializing", True)
+@@ -134,6 +135,10 @@ class EventManager:
+             priority = EventManager.PRIORITY_HIGH
+         elif event_type.startswith("object:active-descendant-changed"):
+             priority = EventManager.PRIORITY_HIGH
++        elif event_type.startswith("object:state-changed:invalid-entry"):
++            # Setting this to lower ensures we present the state and/or text changes that triggered
++            # the invalid state prior to presenting the invalid state.
++            priority = EventManager.PRIORITY_LOWER
+         elif event_type.startswith("object:children-changed"):
+             priority = EventManager.PRIORITY_LOW
+         else:
+diff --git a/src/orca/scripts/default.py b/src/orca/scripts/default.py
+index 321fa2799..30661c9c2 100644
+--- a/src/orca/scripts/default.py
++++ b/src/orca/scripts/default.py
+@@ -200,6 +200,7 @@ class Script(script.Script):
+         listeners["object:state-changed:expanded"] = self.on_expanded_changed
+         listeners["object:state-changed:focused"] = self.on_focused_changed
+         listeners["object:state-changed:indeterminate"] = self.on_indeterminate_changed
++        listeners["object:state-changed:invalid-entry"] = self.on_invalid_entry_changed
+         listeners["object:state-changed:pressed"] = self.on_pressed_changed
+         listeners["object:state-changed:selected"] = self.on_selected_changed
+         listeners["object:state-changed:sensitive"] = self.on_sensitive_changed
+@@ -1154,6 +1155,12 @@ class Script(script.Script):
+         if AXUtilities.is_presentable_indeterminate_change(event):
+             self.presentObject(event.source, alreadyFocused=True, interrupt=True)
+ 
++    def on_invalid_entry_changed(self, event):
++        """Callback for object:state-changed:invalid-entry accessibility events."""
++
++        if AXUtilities.is_presentable_invalid_entry_change(event):
++            self.presentMessage(self.speech_generator.get_error_message(event.source))
++
+     def on_mouse_button(self, event):
+         """Callback for mouse:button events."""
+ 
+diff --git a/src/orca/speech_generator.py b/src/orca/speech_generator.py
+index 39985fba6..f54f0d137 100644
+--- a/src/orca/speech_generator.py
++++ b/src/orca/speech_generator.py
+@@ -127,6 +127,14 @@ class SpeechGenerator(generator.Generator):
+             return generated[0]
+         return ""
+ 
++    def get_error_message(self, obj, **args):
++        """Returns the generated error message for obj as a string."""
++
++        generated = self._generate_state_invalid(obj, **args)
++        if generated:
++            return generated[0]
++        return ""
++
+     def get_localized_role_name(self, obj, **args):
+         if AXUtilities.is_editable_combo_box(obj) \
+            or self._script.utilities.isEditableDescendantOfComboBox(obj):
+-- 
+2.53.0
+
+From 3745f996b7eec60ff7e440c12e8660897b80f7a1 Mon Sep 17 00:00:00 2001
+From: Joanmarie Diggs <jdiggs@igalia.com>
+Date: Tue, 24 Jun 2025 13:48:35 +0200
+Subject: [PATCH] Braille error message for checkboxes
+
+The default presentation and the text-object presentation generate
+error messages in braille. This was missing for checkboxes.
+
+See issue #514.
+---
+ src/orca/braille_generator.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/orca/braille_generator.py b/src/orca/braille_generator.py
+index bc3604216..ed4ec9562 100644
+--- a/src/orca/braille_generator.py
++++ b/src/orca/braille_generator.py
+@@ -512,7 +512,9 @@ class BrailleGenerator(generator.Generator):
+         result += [braille.Component(
+             obj, self._as_string(
+                 self._generate_accessible_label_and_name(obj, **args) +
+-                self._generate_accessible_role(obj, **args)),
++                self._generate_accessible_role(obj, **args) +
++                self._generate_state_required(obj, **args) +
++                self._generate_state_invalid(obj, **args)),
+             indicator=self._as_string(self._generate_state_checked(obj, **args)))]
+         result += self._generate_default_suffix(obj, **args)
+         return result
+-- 
+2.53.0
+
+From 8a28002dc9fdf45ae7a97e4b36b66f77aa565fd3 Mon Sep 17 00:00:00 2001
+From: Joanmarie Diggs <jdiggs@igalia.com>
+Date: Tue, 24 Jun 2025 14:20:52 +0200
+Subject: [PATCH] Announce when the invalid-entry state is cleared
+
+Also refresh braille.
+
+See issue #514.
+---
+ src/orca/ax_utilities_event.py |  2 --
+ src/orca/messages.py           |  8 ++++++++
+ src/orca/scripts/default.py    | 11 +++++++++--
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/src/orca/ax_utilities_event.py b/src/orca/ax_utilities_event.py
+index c92b0436d..e1a012a7f 100644
+--- a/src/orca/ax_utilities_event.py
++++ b/src/orca/ax_utilities_event.py
+@@ -160,8 +160,6 @@ class AXUtilitiesEvent:
+         AXUtilitiesEvent.LAST_KNOWN_EXPANDED[hash(obj)] = AXUtilitiesState.is_expanded(obj)
+         AXUtilitiesEvent.LAST_KNOWN_INDETERMINATE[hash(obj)] = \
+             AXUtilitiesState.is_indeterminate(obj)
+-        AXUtilitiesEvent.LAST_KNOWN_INVALID_ENTRY[hash(obj)] = \
+-            AXUtilitiesState.is_invalid_entry(obj)
+         AXUtilitiesEvent.LAST_KNOWN_PRESSED[hash(obj)] = AXUtilitiesState.is_pressed(obj)
+         AXUtilitiesEvent.LAST_KNOWN_SELECTED[hash(obj)] = AXUtilitiesState.is_selected(obj)
+ 
+diff --git a/src/orca/messages.py b/src/orca/messages.py
+index f52412148..4d81d81e9 100644
+--- a/src/orca/messages.py
++++ b/src/orca/messages.py
+@@ -1269,6 +1269,14 @@ INDENTATION_JUSTIFICATION_ON_BRIEF = \
+ INDENTATION_JUSTIFICATION_ON_FULL = \
+     _("Speaking of indentation and justification enabled.")
+ 
++# Translators: Orca announces when a widget has an associated error, such as
++# disallowed characters in an input, or a must-check box that is not checked
++# (e.g. "I read and agree to the terms of service."). When this error message
++# goes away as a consequence of the user fixing the error, Orca will present
++# this string. When translating this string please use language similar to
++# that used for `C_("error", "invalid entry")` in object_properties.py.
++INVALID_ENTRY_FIXED = C_("error", "Entry valid.")
++
+ # Translators: Orca has a "Learn Mode" that will allow the user to type any key
+ # on the keyboard and hear what the effects of that key would be.  The effects
+ # might be what Orca would do if it had a handler for the particular key
+diff --git a/src/orca/scripts/default.py b/src/orca/scripts/default.py
+index 30661c9c2..2f91751f1 100644
+--- a/src/orca/scripts/default.py
++++ b/src/orca/scripts/default.py
+@@ -1158,8 +1158,15 @@ class Script(script.Script):
+     def on_invalid_entry_changed(self, event):
+         """Callback for object:state-changed:invalid-entry accessibility events."""
+ 
+-        if AXUtilities.is_presentable_invalid_entry_change(event):
+-            self.presentMessage(self.speech_generator.get_error_message(event.source))
++        if not AXUtilities.is_presentable_invalid_entry_change(event):
++            return
++
++        if event.detail1:
++            msg = self.speech_generator.get_error_message(event.source)
++        else:
++            msg = messages.INVALID_ENTRY_FIXED
++        self.speakMessage(msg)
++        self.update_braille(event.source)
+ 
+     def on_mouse_button(self, event):
+         """Callback for mouse:button events."""
+-- 
+2.53.0
+
+From 05e35766a85374501812102ca00b3df15412afca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luk=C3=A1=C5=A1=20Tyrychtr?= <ltyrycht@redhat.com>
+Date: Tue, 31 Mar 2026 15:33:11 +0200
+Subject: [PATCH] Cherry-pick the one needed string and add it to locale files
+
+---
+ po/bg.po       | 11 +++++++++++
+ po/ca.po       | 11 +++++++++++
+ po/cs.po       | 11 +++++++++++
+ po/da.po       | 11 +++++++++++
+ po/de.po       | 11 +++++++++++
+ po/el.po       | 11 +++++++++++
+ po/en_GB.po    | 11 +++++++++++
+ po/eo.po       | 11 +++++++++++
+ po/eu.po       | 11 +++++++++++
+ po/fa.po       | 11 +++++++++++
+ po/fi.po       | 14 ++++++++++++++
+ po/fr.po       | 11 +++++++++++
+ po/gl.po       | 11 +++++++++++
+ po/hu.po       | 11 +++++++++++
+ po/id.po       | 11 +++++++++++
+ po/ka.po       | 11 +++++++++++
+ po/kk.po       | 11 +++++++++++
+ po/lt.po       | 11 +++++++++++
+ po/nl.po       | 11 +++++++++++
+ po/oc.po       | 14 ++++++++++++++
+ po/pl.po       | 11 +++++++++++
+ po/pt.po       | 11 +++++++++++
+ po/pt_BR.po    | 11 +++++++++++
+ po/ro.po       | 11 +++++++++++
+ po/ru.po       | 11 +++++++++++
+ po/sl.po       | 11 +++++++++++
+ po/sr.po       | 11 +++++++++++
+ po/sr@latin.po | 11 +++++++++++
+ po/sv.po       | 11 +++++++++++
+ po/th.po       | 11 +++++++++++
+ po/tr.po       | 11 +++++++++++
+ po/ug.po       | 11 +++++++++++
+ po/uk.po       | 11 +++++++++++
+ po/zh_CN.po    | 11 +++++++++++
+ po/zh_TW.po    | 11 +++++++++++
+ 36 files changed, 402 insertions(+)
+
+diff --git a/po/bg.po b/po/bg.po
+index 87e7ef980..ed0c44223 100644
+--- a/po/bg.po
++++ b/po/bg.po
+@@ -13534,3 +13534,14 @@ msgstr "непрекъснато"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "правопис"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Валиден запис."
+diff --git a/po/ca.po b/po/ca.po
+index 60105ead3..7ba6a845f 100644
+--- a/po/ca.po
++++ b/po/ca.po
+@@ -13635,3 +13635,14 @@ msgstr "verificació ortogràfica"
+ #~ msgid "Speak multicase strings as wor_ds"
+ #~ msgstr ""
+ #~ "Pronuncia les cadenes AmbMajúsculesIMinúscules com a _paraules separades"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entrada vàlida."
+diff --git a/po/cs.po b/po/cs.po
+index a8bfb2511..e35d7cda1 100644
+--- a/po/cs.po
++++ b/po/cs.po
+@@ -14299,3 +14299,14 @@ msgstr "kontrola pravopisu"
+ #~ "K ukončení použijte Escape.\n"
+ #~ "K zopakování naposledy přečtené zprávy použijte mezerník.\n"
+ #~ "K přečtení konkrétní zprávy zmáčkněte jednu z číslic.\n"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Platné vstupní pole."
+diff --git a/po/da.po b/po/da.po
+index 571305874..cde406f03 100644
+--- a/po/da.po
++++ b/po/da.po
+@@ -14219,3 +14219,14 @@ msgstr "stavning"
+ 
+ #~ msgid "Remove User Profile"
+ #~ msgstr "Fjern brugerprofil"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Indtastning gyldig."
+diff --git a/po/de.po b/po/de.po
+index c1ef9ebd7..f445dfe5b 100644
+--- a/po/de.po
++++ b/po/de.po
+@@ -14332,3 +14332,14 @@ msgstr "Rechtschreibung"
+ 
+ #~ msgid "Display more options"
+ #~ msgstr "Weitere Optionen anzeigen"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Eintrag gültig."
+diff --git a/po/el.po b/po/el.po
+index 23cda5ff7..a5e1dc2f2 100644
+--- a/po/el.po
++++ b/po/el.po
+@@ -15432,3 +15432,14 @@ msgstr "ορθογραφία"
+ 
+ #~ msgid "Negative hue shift"
+ #~ msgstr "Αρνητική μετατόπιση της απόχρωσης "
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Η εισαγωγή είναι έγκυρη."
+diff --git a/po/en_GB.po b/po/en_GB.po
+index c36aa6f10..e4b816efa 100644
+--- a/po/en_GB.po
++++ b/po/en_GB.po
+@@ -16439,3 +16439,14 @@ msgstr "spelling"
+ 
+ #~ msgid "TREE ITEM"
+ #~ msgstr "TREE ITEM"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entry valid."
+diff --git a/po/eo.po b/po/eo.po
+index e05ad2ec9..aac132b8c 100644
+--- a/po/eo.po
++++ b/po/eo.po
+@@ -14675,3 +14675,14 @@ msgstr ""
+ 
+ #~ msgid "open"
+ #~ msgstr "malfermi"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Enigo valida."
+diff --git a/po/eu.po b/po/eu.po
+index f2a26c351..94eea79fe 100644
+--- a/po/eu.po
++++ b/po/eu.po
+@@ -14223,3 +14223,14 @@ msgstr "akats ortografikoa"
+ 
+ #~ msgid "Restrict to:"
+ #~ msgstr "Murriztu hona:"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Sarrera baliozkoa."
+diff --git a/po/fa.po b/po/fa.po
+index ea8d0418f..970bceddd 100644
+--- a/po/fa.po
++++ b/po/fa.po
+@@ -13879,3 +13879,14 @@ msgstr "نوشتار"
+ #~ msgctxt "structural navigation"
+ #~ msgid "Interal Frames"
+ #~ msgstr "قاب‌های درونی"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1280
++msgctxt "error"
++msgid "Entry valid."
++msgstr "مدخل معتبر."
+diff --git a/po/fi.po b/po/fi.po
+index 2e9da252f..b36afd842 100644
+--- a/po/fi.po
++++ b/po/fi.po
+@@ -14764,3 +14764,17 @@ msgstr "oikeinkirjoitus"
+ 
+ #~ msgid "open"
+ #~ msgstr "avaa"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++#, fuzzy
++#| msgctxt "error"
++#| msgid "invalid"
++msgctxt "error"
++msgid "Entry valid."
++msgstr "virheellinen"
+diff --git a/po/fr.po b/po/fr.po
+index e04d41012..a2667e96a 100644
+--- a/po/fr.po
++++ b/po/fr.po
+@@ -14289,3 +14289,14 @@ msgstr "orthographe"
+ 
+ #~ msgid "Speaks the selected text."
+ #~ msgstr "Lit le texte sélectionné."
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entrée valide."
+diff --git a/po/gl.po b/po/gl.po
+index 1013b0bc5..18ff58867 100644
+--- a/po/gl.po
++++ b/po/gl.po
+@@ -15741,3 +15741,14 @@ msgstr "verificación ortográfica"
+ 
+ #~ msgid "Restrict to:"
+ #~ msgstr "Restrinxido a:"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1170
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entrada válida."
+diff --git a/po/hu.po b/po/hu.po
+index 042dd6482..75bb2caaf 100644
+--- a/po/hu.po
++++ b/po/hu.po
+@@ -14410,3 +14410,14 @@ msgstr "betűtévesztés"
+ #~ msgctxt "role"
+ #~ msgid "footnote"
+ #~ msgstr "Lábjegyzet"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1172
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Érvényes beviteli mező."
+diff --git a/po/id.po b/po/id.po
+index 982ae7fae..52a741b38 100644
+--- a/po/id.po
++++ b/po/id.po
+@@ -13458,3 +13458,14 @@ msgstr "padat"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "pengejaan"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1280
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entri valid."
+diff --git a/po/ka.po b/po/ka.po
+index 42f2126df..19f038879 100644
+--- a/po/ka.po
++++ b/po/ka.po
+@@ -14102,3 +14102,14 @@ msgstr "მართლწერა"
+ 
+ #~ msgid "Alt_L"
+ #~ msgstr "Alt_L"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "ჩანაწერი სწორია."
+diff --git a/po/kk.po b/po/kk.po
+index 5f030b97a..b2d29c0e5 100644
+--- a/po/kk.po
++++ b/po/kk.po
+@@ -13423,3 +13423,14 @@ msgstr ""
+ 
+ #~ msgid "Function"
+ #~ msgstr "Функция"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Жазба жарамды."
+diff --git a/po/lt.po b/po/lt.po
+index e86b4ea81..c371af661 100644
+--- a/po/lt.po
++++ b/po/lt.po
+@@ -14484,3 +14484,14 @@ msgstr "rašyba"
+ 
+ #~ msgid "open"
+ #~ msgstr "atverti"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Įvestis tinkama."
+diff --git a/po/nl.po b/po/nl.po
+index 1332206ad..746f225dc 100644
+--- a/po/nl.po
++++ b/po/nl.po
+@@ -14484,3 +14484,14 @@ msgstr "spelling"
+ 
+ #~ msgid "acute accent"
+ #~ msgstr "accent aigu"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1280
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Ingang geldig."
+diff --git a/po/oc.po b/po/oc.po
+index 920a2117c..f7241fa29 100644
+--- a/po/oc.po
++++ b/po/oc.po
+@@ -14865,3 +14865,17 @@ msgstr ""
+ #~ msgstr ""
+ #~ "_Posicionar lo cursor al començament de la linha al moment de la "
+ #~ "navigacion verticala"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++#, fuzzy
++#| msgctxt "error"
++#| msgid "invalid"
++msgctxt "error"
++msgid "Entry valid."
++msgstr "invalid"
+diff --git a/po/pl.po b/po/pl.po
+index 9efb9f68b..0087af2fd 100644
+--- a/po/pl.po
++++ b/po/pl.po
+@@ -13599,3 +13599,14 @@ msgstr "pełna"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "pisownia"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Pole jest prawidłowe."
+diff --git a/po/pt.po b/po/pt.po
+index 42caf022c..f80b69cc3 100644
+--- a/po/pt.po
++++ b/po/pt.po
+@@ -14388,3 +14388,14 @@ msgstr "soletrar"
+ 
+ #~ msgid "Setup complete.  Press Return to continue."
+ #~ msgstr "Configuração terminada.  Prima Enter para continuar."
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entrada válida."
+diff --git a/po/pt_BR.po b/po/pt_BR.po
+index e36add198..b89d35ba2 100644
+--- a/po/pt_BR.po
++++ b/po/pt_BR.po
+@@ -14643,3 +14643,14 @@ msgstr "ortografia"
+ 
+ #~ msgid "Enable Braille _monitor"
+ #~ msgstr "Habilitar o _monitor Braille"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Entrada válida."
+diff --git a/po/ro.po b/po/ro.po
+index 9a1dec7cf..2bbc2898a 100644
+--- a/po/ro.po
++++ b/po/ro.po
+@@ -13581,3 +13581,14 @@ msgstr "îngroșat"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "ortografie"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1249
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Corect."
+diff --git a/po/ru.po b/po/ru.po
+index cc1a7e0b9..9bc502ed7 100644
+--- a/po/ru.po
++++ b/po/ru.po
+@@ -14302,3 +14302,14 @@ msgstr "правописание"
+ #~ "Чтобы выйти, нажмите Escape.\n"
+ #~ "Чтобы повторить последнее сообщение, нажмите пробел.\n"
+ #~ "Чтобы произнести определённое сообщение, нажмите одну цифру.\n"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1172
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Ввод верный."
+diff --git a/po/sl.po b/po/sl.po
+index 05818d7fd..3d38035d6 100644
+--- a/po/sl.po
++++ b/po/sl.po
+@@ -13643,3 +13643,14 @@ msgstr "polno"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "črkovanje"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1172
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Vnos je veljaven."
+diff --git a/po/sr.po b/po/sr.po
+index 3e7f4a175..039bdc1bf 100644
+--- a/po/sr.po
++++ b/po/sr.po
+@@ -14461,3 +14461,14 @@ msgstr "правопис"
+ 
+ #~ msgid "open"
+ #~ msgstr "отвори"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Унос је исправан."
+diff --git a/po/sr@latin.po b/po/sr@latin.po
+index 100e59fd0..d934a8d47 100644
+--- a/po/sr@latin.po
++++ b/po/sr@latin.po
+@@ -14461,3 +14461,14 @@ msgstr "pravopis"
+ 
+ #~ msgid "open"
+ #~ msgstr "otvori"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1280
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Unos je ispravan."
+diff --git a/po/sv.po b/po/sv.po
+index dbb47c3bb..da3b0eaa2 100644
+--- a/po/sv.po
++++ b/po/sv.po
+@@ -14474,3 +14474,14 @@ msgstr "stavning"
+ #~ msgid_plural "%(key)s %(value)s pixels"
+ #~ msgstr[0] "%(key)s %(value)s bildpunkt"
+ #~ msgstr[1] "%(key)s %(value)s bildpunkter"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Posten giltig."
+diff --git a/po/th.po b/po/th.po
+index d002a4560..23495819d 100644
+--- a/po/th.po
++++ b/po/th.po
+@@ -15921,3 +15921,14 @@ msgstr "สะกดผิด"
+ 
+ #~ msgid "%s %s"
+ #~ msgstr "%s %s"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1280
++msgctxt "error"
++msgid "Entry valid."
++msgstr "ช่องป้อนข้อความใช้ได้"
+diff --git a/po/tr.po b/po/tr.po
+index 527b9346d..8b8878cb6 100644
+--- a/po/tr.po
++++ b/po/tr.po
+@@ -13476,3 +13476,14 @@ msgstr "düz"
+ msgctxt "textattr"
+ msgid "spelling"
+ msgstr "heceleme"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Girdi geçersiz."
+diff --git a/po/ug.po b/po/ug.po
+index 5dfa05a9f..f6ae09d9a 100644
+--- a/po/ug.po
++++ b/po/ug.po
+@@ -9738,3 +9738,14 @@ msgstr "تارايتىش ئۈچۈن سول ئىسترېلكىنى بېسىڭ، 
+ 
+ #~ msgid "Deer Park"
+ #~ msgstr "Deer Park"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "كىرگۈزۈش ئىناۋەتلىك."
+diff --git a/po/uk.po b/po/uk.po
+index 709e3140d..1b7ef3a24 100644
+--- a/po/uk.po
++++ b/po/uk.po
+@@ -14382,3 +14382,14 @@ msgstr "орфографія"
+ 
+ #~ msgid "Results must:"
+ #~ msgstr "Результати повинні:"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1172
++msgctxt "error"
++msgid "Entry valid."
++msgstr "Коректний запис."
+diff --git a/po/zh_CN.po b/po/zh_CN.po
+index 5ac081c1f..c66db44c7 100644
+--- a/po/zh_CN.po
++++ b/po/zh_CN.po
+@@ -14676,3 +14676,14 @@ msgstr "拼写"
+ 
+ #~ msgid "The following items can be enabled or disabled:"
+ #~ msgstr "以下项可启用或禁用:"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1154
++msgctxt "error"
++msgid "Entry valid."
++msgstr "条目有效。"
+diff --git a/po/zh_TW.po b/po/zh_TW.po
+index f1595b752..eb61a0a35 100644
+--- a/po/zh_TW.po
++++ b/po/zh_TW.po
+@@ -13624,3 +13624,14 @@ msgstr "要減少按左方向鍵，增加按右方向鍵。要少按 home 按鍵
+ 
+ #~ msgid "open"
+ #~ msgstr "開啟"
++
++#. Translators: Orca announces when a widget has an associated error, such as
++#. disallowed characters in an input, or a must-check box that is not checked
++#. (e.g. "I read and agree to the terms of service."). When this error message
++#. goes away as a consequence of the user fixing the error, Orca will present
++#. this string. When translating this string please use language similar to
++#. that used for `C_("error", "invalid entry")` in object_properties.py.
++#: src/orca/messages.py:1178
++msgctxt "error"
++msgid "Entry valid."
++msgstr "無效"
+-- 
+2.53.0
+
